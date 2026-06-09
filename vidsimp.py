@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import base64
 
 import vlc
 from PyQt6.QtCore import QSettings, QSize, Qt, QThread, QTimer, pyqtSignal
@@ -9,7 +10,27 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout,
                              QListView, QListWidget, QListWidgetItem,
                              QMainWindow, QPushButton, QSlider, QVBoxLayout,
-                             QWidget)
+                             QWidget, QStyle)
+
+
+class JumpSlider(QSlider):
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            val = self.minimum() + ((self.maximum() - self.minimum()) * ev.position().x()) / self.width()
+            self.setValue(int(val))
+            self.sliderMoved.emit(int(val))
+            ev.accept()
+        super().mousePressEvent(ev)
+
+
+class CarouselWidget(QListWidget):
+    def wheelEvent(self, event):
+        if event.angleDelta().y() != 0:
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - event.angleDelta().y()
+            )
+        else:
+            super().wheelEvent(event)
 
 
 class ThumbnailLoader(QThread):
@@ -49,7 +70,7 @@ class ThumbnailLoader(QThread):
             ]
 
             subprocess.run(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
             )
 
             if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
@@ -63,6 +84,101 @@ class ThumbnailLoader(QThread):
             return None
 
 
+class FullscreenOverlay(QWidget):
+    play_requested = pyqtSignal()
+    pause_requested = pyqtSignal()
+    stop_requested = pyqtSignal()
+    seek_requested = pyqtSignal(int)
+    volume_requested = pyqtSignal(int)
+    exit_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(50, 50, 50, 50)
+        self.layout.addStretch()
+
+        self.controls_widget = QWidget()
+        self.controls_widget.setStyleSheet("background-color: rgba(30, 30, 30, 200); border-radius: 10px;")
+        self.controls_layout = QHBoxLayout(self.controls_widget)
+        self.controls_layout.setContentsMargins(15, 15, 15, 15)
+        self.controls_layout.setSpacing(10)
+
+        self.time_slider = JumpSlider(Qt.Orientation.Horizontal)
+        self.time_slider.setMaximum(1000)
+        self.time_slider.sliderMoved.connect(self.seek_requested.emit)
+        
+        self.btn_play = QPushButton()
+        self.btn_play.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_play.setToolTip("Play")
+        self.btn_play.clicked.connect(self.play_requested.emit)
+        
+        self.btn_pause = QPushButton()
+        self.btn_pause.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+        self.btn_pause.setToolTip("Pause")
+        self.btn_pause.clicked.connect(self.pause_requested.emit)
+
+        self.btn_stop = QPushButton()
+        self.btn_stop.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self.btn_stop.setToolTip("Stop")
+        self.btn_stop.clicked.connect(self.stop_requested.emit)
+
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setToolTip("Volume")
+        self.volume_slider.setMaximumWidth(200)
+        self.volume_slider.valueChanged.connect(self.volume_requested.emit)
+
+        self.btn_exit = QPushButton()
+        self.btn_exit.setIcon(QIcon("fullscreen.svg"))
+        self.btn_exit.setToolTip("Exit Fullscreen")
+        self.btn_exit.clicked.connect(self.exit_requested.emit)
+
+        self.controls_layout.addWidget(self.btn_play)
+        self.controls_layout.addWidget(self.btn_pause)
+        self.controls_layout.addWidget(self.btn_stop)
+        self.controls_layout.addWidget(self.time_slider)
+        self.controls_layout.addWidget(self.volume_slider)
+        self.controls_layout.addWidget(self.btn_exit)
+
+        self.layout.addWidget(self.controls_widget)
+
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setInterval(3000)
+        self.hide_timer.timeout.connect(self.hide_controls)
+
+        # Poll the global cursor position to detect movement even when translucent
+        from PyQt6.QtGui import QCursor
+        self.last_cursor_pos = QCursor.pos()
+        self.cursor_timer = QTimer(self)
+        self.cursor_timer.setInterval(100)
+        self.cursor_timer.timeout.connect(self.check_cursor_movement)
+        self.cursor_timer.start()
+
+    def check_cursor_movement(self):
+        from PyQt6.QtGui import QCursor
+        current_pos = QCursor.pos()
+        if current_pos != self.last_cursor_pos:
+            self.last_cursor_pos = current_pos
+            if self.isVisible():
+                self.show_controls()
+
+    def show_controls(self):
+        self.controls_widget.show()
+        self.hide_timer.start()
+
+    def hide_controls(self):
+        self.controls_widget.hide()
+
+    def mouseDoubleClickEvent(self, event):
+        self.exit_requested.emit()
+        super().mouseDoubleClickEvent(event)
+
 class VidSimp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -74,10 +190,13 @@ class VidSimp(QMainWindow):
 
         # VLC Initialization
         # We include some common flags, like --no-xlib which is sometimes needed for multithreading
-        self.vlc_instance = vlc.Instance("--no-xlib")
+        # We disable d3d11 hardware decoding bugs by forcing direct3d9 vout which handles Qt embedding perfectly
+        # We disable mouse events so VLC doesn't swallow double-clicks and try to handle fullscreen natively
+        self.vlc_instance = vlc.Instance("--no-xlib", "--vout=direct3d9", "--no-mouse-events")
         self.media_player = self.vlc_instance.media_player_new()
 
         self.is_fullscreen = False
+        self.pending_seek = -1.0
         self.current_directory = ""
         self.supported_extensions = (
             ".mp4",
@@ -91,6 +210,15 @@ class VidSimp(QMainWindow):
         )
 
         self.init_ui()
+
+        self.fs_overlay = FullscreenOverlay(self)
+        self.fs_overlay.play_requested.connect(self.play_video)
+        self.fs_overlay.pause_requested.connect(self.pause_video)
+        self.fs_overlay.stop_requested.connect(self.stop_video)
+        self.fs_overlay.seek_requested.connect(self.set_position)
+        self.fs_overlay.volume_requested.connect(self.set_volume)
+        self.fs_overlay.exit_requested.connect(self.toggle_fullscreen)
+
         self.setup_timers()
         self.load_last_directory()
 
@@ -163,6 +291,7 @@ class VidSimp(QMainWindow):
             self.video_frame.sizePolicy().Policy.Expanding,
             self.video_frame.sizePolicy().Policy.Expanding,
         )
+        self.video_frame.mouseDoubleClickEvent = lambda event: self.toggle_fullscreen()
         self.main_layout.addWidget(self.video_frame, stretch=1)
 
         # Set VLC Window
@@ -180,7 +309,7 @@ class VidSimp(QMainWindow):
         self.control_layout.setSpacing(10)
 
         # 1. Time Slider
-        self.time_slider = QSlider(Qt.Orientation.Horizontal)
+        self.time_slider = JumpSlider(Qt.Orientation.Horizontal)
         self.time_slider.setMaximum(1000)
         self.time_slider.setToolTip("Seek")
         self.time_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -188,7 +317,7 @@ class VidSimp(QMainWindow):
         self.control_layout.addWidget(self.time_slider)
 
         # 2. Carousel
-        self.carousel = QListWidget()
+        self.carousel = CarouselWidget()
         self.carousel.setViewMode(QListView.ViewMode.IconMode)
         self.carousel.setFlow(QListView.Flow.LeftToRight)
         self.carousel.setWrapping(False)
@@ -197,6 +326,11 @@ class VidSimp(QMainWindow):
         self.carousel.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.carousel.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.carousel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.carousel.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        self.carousel.setHorizontalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        from PyQt6.QtWidgets import QScroller
+        QScroller.grabGesture(self.carousel.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+        
         self.carousel.itemActivated.connect(
             self.play_selected_video
         )  # Handles double click or Enter/A
@@ -207,13 +341,35 @@ class VidSimp(QMainWindow):
         self.controller_row_layout = QHBoxLayout(self.controller_row)
         self.controller_row_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.btn_open = QPushButton("Open Folder")
+        self.btn_open = QPushButton()
+        self.btn_open.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.btn_open.setToolTip("Open Folder")
         self.btn_open.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.btn_open.clicked.connect(self.open_folder)
 
-        self.btn_play_pause = QPushButton("Play")
-        self.btn_play_pause.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.btn_play_pause.clicked.connect(self.toggle_play_pause)
+        self.btn_play = QPushButton()
+        self.btn_play.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_play.setToolTip("Play")
+        self.btn_play.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.btn_play.clicked.connect(self.play_video)
+
+        self.btn_pause = QPushButton()
+        self.btn_pause.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+        self.btn_pause.setToolTip("Pause")
+        self.btn_pause.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.btn_pause.clicked.connect(self.pause_video)
+
+        self.btn_stop = QPushButton()
+        self.btn_stop.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self.btn_stop.setToolTip("Stop")
+        self.btn_stop.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.btn_stop.clicked.connect(self.stop_video)
+
+        self.btn_fullscreen = QPushButton()
+        self.btn_fullscreen.setIcon(QIcon("fullscreen.svg"))
+        self.btn_fullscreen.setToolTip("Fullscreen")
+        self.btn_fullscreen.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
 
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
@@ -224,7 +380,10 @@ class VidSimp(QMainWindow):
         self.volume_slider.valueChanged.connect(self.set_volume)
 
         self.controller_row_layout.addWidget(self.btn_open)
-        self.controller_row_layout.addWidget(self.btn_play_pause)
+        self.controller_row_layout.addWidget(self.btn_play)
+        self.controller_row_layout.addWidget(self.btn_pause)
+        self.controller_row_layout.addWidget(self.btn_stop)
+        self.controller_row_layout.addWidget(self.btn_fullscreen)
         self.controller_row_layout.addStretch()
         self.controller_row_layout.addWidget(self.volume_slider)
 
@@ -306,6 +465,9 @@ class VidSimp(QMainWindow):
             pass
 
     def play_selected_video(self, item=None, auto_play=True):
+        if self.media_player.get_state() in [vlc.State.Playing, vlc.State.Paused]:
+            self.save_current_position()
+
         if item is None:
             item = self.carousel.currentItem()
         if item is None:
@@ -317,21 +479,35 @@ class VidSimp(QMainWindow):
 
         if auto_play:
             self.media_player.play()
-            self.btn_play_pause.setText("Pause")
-        else:
-            self.btn_play_pause.setText("Play")
+            self.set_volume(self.volume_slider.value())
+            
+            # Retrieve saved position
+            key = "pos_" + base64.urlsafe_b64encode(file_path.encode('utf-8')).decode('utf-8').rstrip('=')
+            saved_pos = self.settings.value(key, -1.0, type=float)
+            if saved_pos > 0:
+                self.pending_seek = saved_pos
 
-    def toggle_play_pause(self):
+    def play_video(self):
+        if self.media_player.get_media() is None and self.carousel.currentItem():
+            self.play_selected_video()
+        else:
+            self.media_player.play()
+            self.set_volume(self.volume_slider.value())
+
+    def pause_video(self):
         if self.media_player.is_playing():
             self.media_player.pause()
-            self.btn_play_pause.setText("Play")
-        else:
-            # If no media is currently loaded but we have an item in carousel
-            if self.media_player.get_media() is None and self.carousel.currentItem():
-                self.play_selected_video()
-            else:
-                self.media_player.play()
-                self.btn_play_pause.setText("Pause")
+
+    def stop_video(self):
+        self.media_player.stop()
+        self.time_slider.blockSignals(True)
+        self.time_slider.setValue(0)
+        self.time_slider.blockSignals(False)
+        self.fs_overlay.time_slider.blockSignals(True)
+        self.fs_overlay.time_slider.setValue(0)
+        self.fs_overlay.time_slider.blockSignals(False)
+
+
 
     def set_volume(self, volume):
         self.media_player.audio_set_volume(volume)
@@ -341,9 +517,22 @@ class VidSimp(QMainWindow):
         self.media_player.set_position(value / 1000.0)
 
     def update_ui(self):
-        # Update Time Slider and Play/Pause text
+        # Update Time Slider
         if self.media_player.is_playing():
-            self.btn_play_pause.setText("Pause")
+            current_volume = self.media_player.audio_get_volume()
+            if current_volume != self.volume_slider.value():
+                self.volume_slider.blockSignals(True)
+                self.volume_slider.setValue(current_volume)
+                self.volume_slider.blockSignals(False)
+            if current_volume != self.fs_overlay.volume_slider.value():
+                self.fs_overlay.volume_slider.blockSignals(True)
+                self.fs_overlay.volume_slider.setValue(current_volume)
+                self.fs_overlay.volume_slider.blockSignals(False)
+
+            # Handle pending seek
+            if self.pending_seek >= 0:
+                self.media_player.set_position(self.pending_seek)
+                self.pending_seek = -1.0
 
             # Update slider position (0.0 to 1.0)
             pos = self.media_player.get_position()
@@ -352,10 +541,10 @@ class VidSimp(QMainWindow):
                 self.time_slider.blockSignals(True)
                 self.time_slider.setValue(int(pos * 1000))
                 self.time_slider.blockSignals(False)
-        else:
-            # Ensure text says play if paused
-            if self.media_player.get_state() in [vlc.State.Paused, vlc.State.Stopped]:
-                self.btn_play_pause.setText("Play")
+
+                self.fs_overlay.time_slider.blockSignals(True)
+                self.fs_overlay.time_slider.setValue(int(pos * 1000))
+                self.fs_overlay.time_slider.blockSignals(False)
 
         # Check for continuous playback (video ended naturally)
         state = self.media_player.get_state()
@@ -369,7 +558,6 @@ class VidSimp(QMainWindow):
             self.play_selected_video(self.carousel.currentItem())
         else:
             self.media_player.stop()
-            self.btn_play_pause.setText("Play")
 
     def keyPressEvent(self, event):
         # Toggle Fullscreen on 'F' or 'F11'
@@ -383,9 +571,29 @@ class VidSimp(QMainWindow):
         if self.is_fullscreen:
             self.control_panel.setVisible(False)
             self.showFullScreen()
+            self.fs_overlay.setGeometry(self.geometry())
+            self.fs_overlay.show()
+            self.fs_overlay.show_controls()
         else:
             self.control_panel.setVisible(True)
             self.showNormal()
+            self.fs_overlay.hide()
+
+    def save_current_position(self):
+        if self.media_player.get_state() in [vlc.State.Playing, vlc.State.Paused]:
+            item = self.carousel.currentItem()
+            if item:
+                file_path = item.data(Qt.ItemDataRole.UserRole)
+                pos = self.media_player.get_position()
+                key = "pos_" + base64.urlsafe_b64encode(file_path.encode('utf-8')).decode('utf-8').rstrip('=')
+                if 0 < pos < 0.95:
+                    self.settings.setValue(key, pos)
+                else:
+                    self.settings.remove(key)
+
+    def closeEvent(self, event):
+        self.save_current_position()
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":
