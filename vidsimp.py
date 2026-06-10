@@ -84,100 +84,7 @@ class ThumbnailLoader(QThread):
             return None
 
 
-class FullscreenOverlay(QWidget):
-    play_requested = pyqtSignal()
-    pause_requested = pyqtSignal()
-    stop_requested = pyqtSignal()
-    seek_requested = pyqtSignal(int)
-    volume_requested = pyqtSignal(int)
-    exit_requested = pyqtSignal()
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setMouseTracking(True)
-
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(50, 50, 50, 50)
-        self.layout.addStretch()
-
-        self.controls_widget = QWidget()
-        self.controls_widget.setStyleSheet("background-color: rgba(30, 30, 30, 200); border-radius: 10px;")
-        self.controls_layout = QHBoxLayout(self.controls_widget)
-        self.controls_layout.setContentsMargins(15, 15, 15, 15)
-        self.controls_layout.setSpacing(10)
-
-        self.time_slider = JumpSlider(Qt.Orientation.Horizontal)
-        self.time_slider.setMaximum(1000)
-        self.time_slider.sliderMoved.connect(self.seek_requested.emit)
-        
-        self.btn_play = QPushButton()
-        self.btn_play.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.btn_play.setToolTip("Play")
-        self.btn_play.clicked.connect(self.play_requested.emit)
-        
-        self.btn_pause = QPushButton()
-        self.btn_pause.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
-        self.btn_pause.setToolTip("Pause")
-        self.btn_pause.clicked.connect(self.pause_requested.emit)
-
-        self.btn_stop = QPushButton()
-        self.btn_stop.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
-        self.btn_stop.setToolTip("Stop")
-        self.btn_stop.clicked.connect(self.stop_requested.emit)
-
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(100)
-        self.volume_slider.setToolTip("Volume")
-        self.volume_slider.setMaximumWidth(200)
-        self.volume_slider.valueChanged.connect(self.volume_requested.emit)
-
-        self.btn_exit = QPushButton()
-        self.btn_exit.setIcon(QIcon("fullscreen.svg"))
-        self.btn_exit.setToolTip("Exit Fullscreen")
-        self.btn_exit.clicked.connect(self.exit_requested.emit)
-
-        self.controls_layout.addWidget(self.btn_play)
-        self.controls_layout.addWidget(self.btn_pause)
-        self.controls_layout.addWidget(self.btn_stop)
-        self.controls_layout.addWidget(self.time_slider)
-        self.controls_layout.addWidget(self.volume_slider)
-        self.controls_layout.addWidget(self.btn_exit)
-
-        self.layout.addWidget(self.controls_widget)
-
-        self.hide_timer = QTimer(self)
-        self.hide_timer.setInterval(3000)
-        self.hide_timer.timeout.connect(self.hide_controls)
-
-        # Poll the global cursor position to detect movement even when translucent
-        from PyQt6.QtGui import QCursor
-        self.last_cursor_pos = QCursor.pos()
-        self.cursor_timer = QTimer(self)
-        self.cursor_timer.setInterval(100)
-        self.cursor_timer.timeout.connect(self.check_cursor_movement)
-        self.cursor_timer.start()
-
-    def check_cursor_movement(self):
-        from PyQt6.QtGui import QCursor
-        current_pos = QCursor.pos()
-        if current_pos != self.last_cursor_pos:
-            self.last_cursor_pos = current_pos
-            if self.isVisible():
-                self.show_controls()
-
-    def show_controls(self):
-        self.controls_widget.show()
-        self.hide_timer.start()
-
-    def hide_controls(self):
-        self.controls_widget.hide()
-
-    def mouseDoubleClickEvent(self, event):
-        self.exit_requested.emit()
-        super().mouseDoubleClickEvent(event)
 
 class VidSimp(QMainWindow):
     def __init__(self):
@@ -211,13 +118,7 @@ class VidSimp(QMainWindow):
 
         self.init_ui()
 
-        self.fs_overlay = FullscreenOverlay(self)
-        self.fs_overlay.play_requested.connect(self.play_video)
-        self.fs_overlay.pause_requested.connect(self.pause_video)
-        self.fs_overlay.stop_requested.connect(self.stop_video)
-        self.fs_overlay.seek_requested.connect(self.set_position)
-        self.fs_overlay.volume_requested.connect(self.set_volume)
-        self.fs_overlay.exit_requested.connect(self.toggle_fullscreen)
+
 
         self.setup_timers()
         self.load_last_directory()
@@ -379,6 +280,12 @@ class VidSimp(QMainWindow):
         self.volume_slider.setMaximumWidth(200)
         self.volume_slider.valueChanged.connect(self.set_volume)
 
+        self.btn_quit = QPushButton()
+        self.btn_quit.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        self.btn_quit.setToolTip("Exit App")
+        self.btn_quit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.btn_quit.clicked.connect(self.close)
+
         self.controller_row_layout.addWidget(self.btn_open)
         self.controller_row_layout.addWidget(self.btn_play)
         self.controller_row_layout.addWidget(self.btn_pause)
@@ -386,6 +293,7 @@ class VidSimp(QMainWindow):
         self.controller_row_layout.addWidget(self.btn_fullscreen)
         self.controller_row_layout.addStretch()
         self.controller_row_layout.addWidget(self.volume_slider)
+        self.controller_row_layout.addWidget(self.btn_quit)
 
         self.control_layout.addWidget(self.controller_row)
         self.main_layout.addWidget(self.control_panel)
@@ -395,6 +303,18 @@ class VidSimp(QMainWindow):
         self.update_timer.setInterval(1000)
         self.update_timer.timeout.connect(self.update_ui)
         self.update_timer.start()
+
+        # OSD Auto-Hide Timer
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setInterval(3000)
+        self.hide_timer.timeout.connect(self.hide_controls)
+
+        # Cursor polling for OSD activation
+        from PyQt6.QtGui import QCursor
+        self.last_cursor_pos = QCursor.pos()
+        self.cursor_timer = QTimer(self)
+        self.cursor_timer.setInterval(100)
+        self.cursor_timer.timeout.connect(self.check_cursor_movement)
 
     def load_last_directory(self):
         last_dir = self.settings.value("last_directory", "")
@@ -503,9 +423,6 @@ class VidSimp(QMainWindow):
         self.time_slider.blockSignals(True)
         self.time_slider.setValue(0)
         self.time_slider.blockSignals(False)
-        self.fs_overlay.time_slider.blockSignals(True)
-        self.fs_overlay.time_slider.setValue(0)
-        self.fs_overlay.time_slider.blockSignals(False)
 
 
 
@@ -524,10 +441,6 @@ class VidSimp(QMainWindow):
                 self.volume_slider.blockSignals(True)
                 self.volume_slider.setValue(current_volume)
                 self.volume_slider.blockSignals(False)
-            if current_volume != self.fs_overlay.volume_slider.value():
-                self.fs_overlay.volume_slider.blockSignals(True)
-                self.fs_overlay.volume_slider.setValue(current_volume)
-                self.fs_overlay.volume_slider.blockSignals(False)
 
             # Handle pending seek
             if self.pending_seek >= 0:
@@ -541,10 +454,6 @@ class VidSimp(QMainWindow):
                 self.time_slider.blockSignals(True)
                 self.time_slider.setValue(int(pos * 1000))
                 self.time_slider.blockSignals(False)
-
-                self.fs_overlay.time_slider.blockSignals(True)
-                self.fs_overlay.time_slider.setValue(int(pos * 1000))
-                self.fs_overlay.time_slider.blockSignals(False)
 
         # Check for continuous playback (video ended naturally)
         state = self.media_player.get_state()
@@ -571,13 +480,29 @@ class VidSimp(QMainWindow):
         if self.is_fullscreen:
             self.control_panel.setVisible(False)
             self.showFullScreen()
-            self.fs_overlay.setGeometry(self.geometry())
-            self.fs_overlay.show()
-            self.fs_overlay.show_controls()
+            self.cursor_timer.start()
         else:
             self.control_panel.setVisible(True)
             self.showNormal()
-            self.fs_overlay.hide()
+            self.cursor_timer.stop()
+            self.hide_timer.stop()
+
+    def check_cursor_movement(self):
+        from PyQt6.QtGui import QCursor
+        current_pos = QCursor.pos()
+        if current_pos != self.last_cursor_pos:
+            self.last_cursor_pos = current_pos
+            if self.is_fullscreen:
+                self.show_controls()
+
+    def show_controls(self):
+        if self.is_fullscreen:
+            self.control_panel.setVisible(True)
+            self.hide_timer.start()
+
+    def hide_controls(self):
+        if self.is_fullscreen:
+            self.control_panel.setVisible(False)
 
     def save_current_position(self):
         if self.media_player.get_state() in [vlc.State.Playing, vlc.State.Paused]:
