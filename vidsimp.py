@@ -99,7 +99,11 @@ class VidSimp(QMainWindow):
         # We include some common flags, like --no-xlib which is sometimes needed for multithreading
         # We disable d3d11 hardware decoding bugs by forcing direct3d9 vout which handles Qt embedding perfectly
         # We disable mouse events so VLC doesn't swallow double-clicks and try to handle fullscreen natively
-        self.vlc_instance = vlc.Instance("--no-xlib", "--vout=direct3d9", "--no-mouse-events")
+        vlc_args = ["--no-xlib", "--no-mouse-events"]
+        if sys.platform == "win32":
+            vlc_args.append("--vout=direct3d9")
+
+        self.vlc_instance = vlc.Instance(*vlc_args)
         self.media_player = self.vlc_instance.media_player_new()
 
         self.is_fullscreen = False
@@ -394,8 +398,15 @@ class VidSimp(QMainWindow):
             return
 
         file_path = item.data(Qt.ItemDataRole.UserRole)
+        
+        # Explicitly release the old media object to prevent memory/VRAM leaks over long sessions
+        old_media = self.media_player.get_media()
+        
         media = self.vlc_instance.media_new(file_path)
         self.media_player.set_media(media)
+        
+        if old_media:
+            old_media.release()
 
         if auto_play:
             self.media_player.play()
