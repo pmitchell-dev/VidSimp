@@ -43,6 +43,8 @@ class ThumbnailLoader(QThread):
 
     def run(self):
         for f in self.files:
+            if self.isInterruptionRequested():
+                break
             file_path = os.path.join(self.directory, f)
             temp_image_path = self.generate_thumbnail(file_path)
             if temp_image_path:
@@ -530,10 +532,21 @@ class VidSimp(QMainWindow):
 
     def closeEvent(self, event):
         self.save_current_position()
+        if hasattr(self, "thumbnail_loader") and self.thumbnail_loader.isRunning():
+            self.thumbnail_loader.requestInterruption()
+            self.thumbnail_loader.wait()
         super().closeEvent(event)
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        import ctypes
+        myappid = 'pmitchell.vidsimp.player.1'
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
 
     player = VidSimp()
