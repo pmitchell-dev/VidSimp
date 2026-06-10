@@ -1,5 +1,6 @@
 # VidSimp
 
+![VidSimp Logo](logo.png)
 VidSimp is a robust, production-ready video player application for Linux, specifically optimized for Arch Linux and the Steam Deck. It is built as a clean, single-file Python script (`vidsimp.py`) with its dependencies clearly defined, focused on providing an immersive and touch-friendly viewing experience.
 
 ## One-Step SteamOS Installation

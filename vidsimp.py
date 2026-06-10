@@ -90,6 +90,7 @@ class VidSimp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VidSimp")
+        self.setWindowIcon(QIcon("logo.png"))
         self.resize(1024, 768)
 
         # Settings for persistence
